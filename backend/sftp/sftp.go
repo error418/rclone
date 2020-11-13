@@ -25,7 +25,6 @@ import (
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/config/obscure"
-	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/env"
 	"github.com/rclone/rclone/lib/pacer"
@@ -33,6 +32,7 @@ import (
 	sshagent "github.com/xanzy/ssh-agent"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+	"golang.org/x/net/proxy"
 )
 
 const (
@@ -65,6 +65,9 @@ func init() {
 		}, {
 			Name: "port",
 			Help: "SSH port, leave blank to use default (22)",
+		}, {
+			Name: "proxy",
+			Help: "SOCKS proxy to use",
 		}, {
 			Name:       "pass",
 			Help:       "SSH password, leave blank to use ssh-agent.",
@@ -201,6 +204,7 @@ type Options struct {
 	Host              string `config:"host"`
 	User              string `config:"user"`
 	Port              string `config:"port"`
+	Proxy             string `config:"proxy"`
 	Pass              string `config:"pass"`
 	KeyPem            string `config:"key_pem"`
 	KeyFile           string `config:"key_file"`
@@ -252,17 +256,40 @@ type Object struct {
 // dial starts a client connection to the given SSH server. It is a
 // convenience function that connects to the given network address,
 // initiates the SSH handshake, and then sets up a Client.
-func (f *Fs) dial(network, addr string, sshConfig *ssh.ClientConfig) (*ssh.Client, error) {
-	dialer := fshttp.NewDialer(fs.Config)
-	conn, err := dialer.Dial(network, addr)
+func (f *Fs) dial(network, addr string, proxyURL string, sshConfig *ssh.ClientConfig) (*ssh.Client, error) {
+	auth := proxy.Auth{
+		User:     "user",
+		Password: "pass",
+	}
+
+	dialer, err := proxy.SOCKS5("tcp", proxyURL, &auth, proxy.Direct)
 	if err != nil {
 		return nil, err
 	}
+
+	conn, err := dialer.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, sshConfig)
 	if err != nil {
 		return nil, err
 	}
+
+	/*
+		//dialer := fshttp.NewDialer(fs.Config)
+		conn, err := dialer.Dial(network, addr)
+		if err != nil {
+			return nil, err
+		}
+		c, chans, reqs, err := ssh.NewClientConn(conn, addr, sshConfig)
+		if err != nil {
+			return nil, err
+		}
+	*/
 	fs.Debugf(f, "New connection %s->%s to %q", c.LocalAddr(), c.RemoteAddr(), c.ServerVersion())
+
 	return ssh.NewClient(c, chans, reqs), nil
 }
 
@@ -304,10 +331,14 @@ func (f *Fs) sftpConnection() (c *conn, err error) {
 	c = &conn{
 		err: make(chan error, 1),
 	}
-	c.sshClient, err = f.dial("tcp", f.opt.Host+":"+f.opt.Port, f.config)
+
+	println("ssh client")
+	c.sshClient, err = f.dial("tcp", f.opt.Host+":"+f.opt.Port, f.opt.Proxy, f.config)
 	if err != nil {
 		return nil, errors.Wrap(err, "couldn't connect SSH")
 	}
+
+	println("sftp client")
 	c.sftpClient, err = f.newSftpClient(c.sshClient)
 	if err != nil {
 		_ = c.sshClient.Close()
